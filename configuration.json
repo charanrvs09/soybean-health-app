@@ -1,0 +1,34 @@
+{
+  "classes": [
+    "healthy",
+    "mosaic",
+    "rust",
+    "pest_attack"
+  ],
+  "leaf": {
+    "architecture": "convnext_tiny",
+    "input_size": 384,
+    "checkpoint_epoch": 14,
+    "test_images": 316,
+    "test_accuracy_percent": 81.65,
+    "test_macro_f1": 0.8422
+  },
+  "drone": {
+    "architecture": "maxvit_t",
+    "input_size": 224,
+    "checkpoint_epoch": 6,
+    "test_images": 440,
+    "test_accuracy_percent": 100.0,
+    "test_macro_f1": 1.0
+  },
+  "selection_metric": "validation_macro_f1",
+  "fusion_implemented": false,
+  "evaluation_limitations": [
+    "Drone results are exploratory.",
+    "Healthy drone image source independence is unverified.",
+    "Different recordings may share fields or capture dates.",
+    "Healthy and diseased leaf images came from different years.",
+    "External generalization has not been established.",
+    "Early-stage disease detection has not been validated."
+  ]
+}
