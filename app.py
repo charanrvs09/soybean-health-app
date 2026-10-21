@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 from PIL import Image, ImageOps
 
-from inference import predict_crop
+from inference import predict_crop, predict_fusion
 
 
 st.set_page_config(
@@ -23,6 +23,7 @@ st.set_page_config(
 )
 
 ROOT = Path(__file__).resolve().parent
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 LABELS = {
     "healthy": "Healthy",
@@ -41,6 +42,62 @@ COLORS = {
     "mosaic": "#F0CD79",
     "rust": "#F2A18A",
     "pest_attack": "#B8AAFA"
+}
+
+PRECAUTIONS = {
+    "healthy": [
+        "Continue inspecting representative plants across the plot.",
+        "If visible symptoms are present, do not dismiss them because "
+        "the model predicted healthy.",
+        "Record changes over time and seek assessment if symptoms "
+        "persist or spread."
+    ],
+    "mosaic": [
+        "Inspect additional plants and take clear close-up photographs "
+        "of the affected and surrounding leaves.",
+        "Ask a local agricultural extension officer or plant diagnostic "
+        "service to distinguish mosaic-like symptoms from other causes.",
+        "If soybean mosaic virus is confirmed, discuss appropriate "
+        "seed-health and resistant-variety options for future planting."
+    ],
+    "rust": [
+        "Inspect affected plants at ground level and photograph both "
+        "surfaces of symptomatic leaves.",
+        "Arrange local diagnostic confirmation; a leaf-spot appearance "
+        "alone does not establish rust.",
+        "Discuss management with a local crop adviser using confirmed "
+        "diagnosis, crop stage, field conditions and local guidance."
+    ],
+    "pest_attack": [
+        "Inspect several locations across the field for live insects "
+        "and fresh feeding damage.",
+        "Assess damage across the canopy, rather than using one heavily "
+        "damaged leaf as the field-wide estimate.",
+        "Identify the pest and crop growth stage before discussing "
+        "locally appropriate action thresholds with a crop adviser."
+    ]
+}
+
+GUIDANCE_LINKS = {
+    "healthy": (
+        "Soybean pest-management resources",
+        "https://extension.umn.edu/soybean/soybean-pest-management"
+    ),
+    "mosaic": (
+        "Soybean mosaic virus — University of Minnesota Extension",
+        "https://extension.umn.edu/agriculture/crop-production/"
+        "soybean/soybean-mosaic-virus"
+    ),
+    "rust": (
+        "Soybean disease diagnosis and scouting — Iowa State Extension",
+        "https://crops.extension.iastate.edu/"
+        "soybean-diseases-symptoms-scouting-and-management"
+    ),
+    "pest_attack": (
+        "Soybean defoliator scouting — Iowa State Extension",
+        "https://crops.extension.iastate.edu/"
+        "cropnews/2023/07/keep-eye-out-soybean-defoliators"
+    )
 }
 
 CSS = """
@@ -434,6 +491,48 @@ p, label {
     font-size: 12px;
     border-radius: 0 8px 8px 0;
 }
+.fusion-heading {
+    padding: 23px 25px;
+    margin: 12px 0 18px;
+    border: 1px solid #484365;
+    border-radius: 18px;
+    background: linear-gradient(120deg, #211f35, #111e26);
+}
+.fusion-heading .eyebrow {
+    color: #c5bafa;
+}
+.fusion-heading h2 {
+    color: #f0eef9;
+    font-size: 27px;
+    margin: 8px 0;
+}
+.fusion-heading p {
+    color: #b9bdd0;
+    font-size: 13px;
+    margin-bottom: 0;
+}
+.guidance-card {
+    border: 1px solid #344d46;
+    background: #12231f;
+    border-radius: 13px;
+    padding: 17px 19px;
+    margin-top: 15px;
+}
+.guidance-card h4 {
+    color: #d5f3e3;
+    font-size: 15px;
+    margin: 0 0 10px;
+}
+.guidance-card li {
+    color: #c4d7cf;
+    font-size: 13px;
+    line-height: 1.65;
+    margin-bottom: 7px;
+}
+.guidance-card ul {
+    margin: 0;
+    padding-left: 18px;
+}
 .footer {
     display: flex;
     justify-content: space-between;
@@ -467,6 +566,7 @@ p, label {
     .hero::after {display: none;}
     .stat-grid {grid-template-columns: 1fr;}
     .topline {flex-wrap: wrap;}
+    .result-metrics {gap: 18px; flex-wrap: wrap;}
 }
 </style>
 """
@@ -479,9 +579,16 @@ def prediction_lock():
     return threading.Lock()
 
 
-def analyze_image(image_bytes, mode):
+def read_image(image_bytes):
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise ValueError("Please use an image smaller than 20 MB.")
+
     with Image.open(io.BytesIO(image_bytes)) as source:
-        image = ImageOps.exif_transpose(source).convert("RGB")
+        return ImageOps.exif_transpose(source).convert("RGB")
+
+
+def analyze_image(image_bytes, mode):
+    image = read_image(image_bytes)
 
     with tempfile.TemporaryDirectory() as temporary_directory:
         image_path = Path(temporary_directory) / "image.png"
@@ -493,10 +600,27 @@ def analyze_image(image_bytes, mode):
     return result
 
 
+def analyze_fusion(leaf_bytes, drone_bytes):
+    leaf_image = read_image(leaf_bytes)
+    drone_image = read_image(drone_bytes)
+
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        leaf_path = Path(temporary_directory) / "leaf.png"
+        drone_path = Path(temporary_directory) / "drone.png"
+
+        leaf_image.save(leaf_path)
+        drone_image.save(drone_path)
+
+        with prediction_lock():
+            result = predict_fusion(leaf_path, drone_path)
+
+    return result
+
+
 def panel_heading(number, title):
     st.markdown(
         f'<div class="panel-head">'
-        f'<div class="step-number">{number}</div>'
+        f'<div class="step-number">{html.escape(number)}</div>'
         f'<h3>{html.escape(title)}</h3></div>',
         unsafe_allow_html=True
     )
@@ -511,6 +635,7 @@ def render_scores(scores):
         reverse=True
     ):
         percentage = max(0.0, min(100.0, float(score) * 100))
+
         rows.append(
             f'<div class="score-row">'
             f'<div class="score-label">'
@@ -526,11 +651,103 @@ def render_scores(scores):
     st.markdown("".join(rows), unsafe_allow_html=True)
 
 
+def render_score_explanation(scores):
+    ranked = sorted(
+        scores.items(),
+        key=lambda item: item[1],
+        reverse=True
+    )
+
+    top_label, top_score = ranked[0]
+    next_label, next_score = ranked[1]
+    margin = (float(top_score) - float(next_score)) * 100
+
+    st.caption(
+        f"Top score: {LABELS[top_label]} {top_score:.2%}. "
+        f"Next: {LABELS[next_label]} {next_score:.2%}. "
+        f"Difference: {margin:.2f} percentage points."
+    )
+
+    st.caption(
+        "These percentages describe model preference, not the proportion "
+        "of infected tissue or the severity of disease. No score threshold "
+        "has been validated for treatment decisions."
+    )
+
+
+def render_precautions(label, aerial=False, disagreement=False):
+    if label is None:
+        st.info(
+            "There is no unique combined category. Review the individual "
+            "predictions and obtain clearer, verified observations."
+        )
+        return
+
+    heading = f"Inspection guidance · possible {LABELS[label].lower()}"
+
+    if label == "healthy":
+        heading = "Inspection guidance · predicted healthy"
+
+    bullet_html = "".join(
+        f"<li>{html.escape(item)}</li>"
+        for item in PRECAUTIONS[label]
+    )
+
+    st.markdown(
+        f'<div class="guidance-card">'
+        f'<h4>{html.escape(heading)}</h4>'
+        f'<ul>{bullet_html}</ul></div>',
+        unsafe_allow_html=True
+    )
+
+    if aerial:
+        st.caption(
+            "For an aerial prediction, inspect the corresponding plants "
+            "at ground level before drawing disease conclusions."
+        )
+
+    if disagreement:
+        st.caption(
+            "The branches disagree. Treat category-specific guidance as "
+            "conditional until symptoms are checked independently."
+        )
+
+    st.caption(
+        "General scouting guidance only. Do not choose a pesticide, "
+        "dosage or spray schedule from this prediction. Seek locally "
+        "applicable advice from a qualified crop adviser or KVK."
+    )
+
+    title, address = GUIDANCE_LINKS[label]
+
+    with st.expander("Guidance reference"):
+        st.markdown(f"[{title}]({address})")
+        st.caption(
+            "Background reference for diagnosis and scouting; "
+            "local recommendations and field conditions take precedence."
+        )
+
+
+def reset_fusion_inputs():
+    st.session_state.verdant_fusion_result = None
+    st.session_state.fusion_pair_confirmed = False
+
+
+def reset_fusion_result():
+    st.session_state.verdant_fusion_result = None
+
+
 if "verdant_history" not in st.session_state:
     st.session_state.verdant_history = []
 
 if "verdant_result" not in st.session_state:
     st.session_state.verdant_result = None
+
+if "verdant_fusion_result" not in st.session_state:
+    st.session_state.verdant_fusion_result = None
+
+if "verdant_fusion_history" not in st.session_state:
+    st.session_state.verdant_fusion_history = []
 
 with st.sidebar:
     st.markdown(
@@ -598,7 +815,7 @@ st.markdown(
     """
     <div class="topline">
         <span>WORKSPACE / CROP HEALTH ASSESSMENT</span>
-        <span class="pill"><span class="dot"></span> Local demo</span>
+        <span class="pill"><span class="dot"></span> Research demo</span>
     </div>
     <div class="hero">
         <div class="eyebrow">A closer look at crop health</div>
@@ -651,11 +868,7 @@ with workspace_tab:
                 image_bytes = uploaded_file.getvalue()
 
                 try:
-                    if len(image_bytes) > 20 * 1024 * 1024:
-                        raise ValueError("Please use an image smaller than 20 MB.")
-
-                    with Image.open(io.BytesIO(image_bytes)) as source:
-                        preview = ImageOps.exif_transpose(source).convert("RGB")
+                    preview = read_image(image_bytes)
 
                     input_key = (
                         hashlib.sha256(image_bytes).hexdigest(),
@@ -677,7 +890,8 @@ with workspace_tab:
                 "Analyze image →",
                 type="primary",
                 width="stretch",
-                disabled=not valid_image
+                disabled=not valid_image,
+                key="single_predict_button"
             )
 
             st.caption(
@@ -761,6 +975,7 @@ with workspace_tab:
                     "Time includes preparation and initial model loading."
                 )
                 render_scores(result["class_scores"])
+                render_score_explanation(result["class_scores"])
 
                 st.markdown(
                     """
@@ -772,12 +987,18 @@ with workspace_tab:
                     unsafe_allow_html=True
                 )
 
+                render_precautions(
+                    result["predicted_label"],
+                    aerial=mode == "drone"
+                )
+
                 st.download_button(
                     "Download result · JSON",
                     data=json.dumps(record, indent=2),
                     file_name="soybean_prediction.json",
                     mime="application/json",
-                    width="stretch"
+                    width="stretch",
+                    key="single_result_download"
                 )
 
             else:
@@ -794,15 +1015,408 @@ with workspace_tab:
                 )
 
     st.caption(
-        "Leaf and drone images are analyzed independently. "
-        "This interface does not perform paired multimodal fusion."
+        "The individual-image workspace above runs one selected branch. "
+        "The separate fusion workspace below uses its own two inputs."
     )
+
+    st.divider()
+
+    st.markdown(
+        """
+        <div class="fusion-heading">
+            <div class="eyebrow">Separate experimental workspace</div>
+            <h2>Leaf–drone fusion</h2>
+            <p>Combine ConvNeXt-Tiny and MaxViT-Tiny class scores.
+            Upload a leaf photograph and an aerial image here;
+            the individual-image upload above is not reused.</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    with st.container(border=True):
+        panel_heading("03", "Fusion inputs")
+
+        fusion_relationship = st.radio(
+            "How are these two images related?",
+            [
+                "Unverified images — software demonstration",
+                "User-confirmed corresponding plot observations"
+            ],
+            key="fusion_relationship",
+            on_change=reset_fusion_inputs
+        )
+
+        verified_pair_mode = fusion_relationship.startswith("User-confirmed")
+
+        pair_details = st.text_input(
+            "Actual source or pairing details",
+            placeholder=(
+                "Record image sources or genuine plot/capture information."
+            ),
+            key="fusion_pair_details",
+            on_change=reset_fusion_result
+        )
+
+        fusion_leaf_column, fusion_drone_column = st.columns(
+            2, gap="large"
+        )
+
+        fusion_leaf_bytes = None
+        fusion_drone_bytes = None
+        fusion_leaf_valid = False
+        fusion_drone_valid = False
+
+        with fusion_leaf_column:
+            st.markdown("**Smartphone / leaf input**")
+            st.caption("Processed by ConvNeXt-Tiny")
+
+            fusion_leaf_file = st.file_uploader(
+                "Upload the leaf image",
+                type=["jpg", "jpeg", "png", "webp"],
+                key="fusion_leaf_upload",
+                on_change=reset_fusion_inputs
+            )
+
+            if fusion_leaf_file is not None:
+                try:
+                    fusion_leaf_bytes = fusion_leaf_file.getvalue()
+                    leaf_preview = read_image(fusion_leaf_bytes)
+                    fusion_leaf_valid = True
+
+                    st.image(
+                        leaf_preview,
+                        caption=fusion_leaf_file.name,
+                        width="stretch"
+                    )
+
+                except Exception as error:
+                    st.error(f"Leaf image error: {error}")
+
+        with fusion_drone_column:
+            st.markdown("**Drone / aerial input**")
+            st.caption("Processed by MaxViT-Tiny")
+
+            fusion_drone_file = st.file_uploader(
+                "Upload the aerial image",
+                type=["jpg", "jpeg", "png", "webp"],
+                key="fusion_drone_upload",
+                on_change=reset_fusion_inputs
+            )
+
+            if fusion_drone_file is not None:
+                try:
+                    fusion_drone_bytes = fusion_drone_file.getvalue()
+                    drone_preview = read_image(fusion_drone_bytes)
+                    fusion_drone_valid = True
+
+                    st.image(
+                        drone_preview,
+                        caption=fusion_drone_file.name,
+                        width="stretch"
+                    )
+
+                except Exception as error:
+                    st.error(f"Drone image error: {error}")
+
+        pairing_confirmed = False
+
+        if verified_pair_mode:
+            pairing_confirmed = st.checkbox(
+                "I have verified that these images represent the same "
+                "plot and relevant capture period, with a common "
+                "assessment target.",
+                key="fusion_pair_confirmed",
+                on_change=reset_fusion_result
+            )
+
+            st.caption(
+                "The app records your confirmation; it cannot verify "
+                "the plot relationship automatically."
+            )
+        else:
+            st.info(
+                "Demonstration mode: arbitrary inputs can exercise the "
+                "software, but their combined scores are not a valid "
+                "assessment of a shared plot."
+            )
+
+        st.caption(
+            "Fixed baseline: 50% leaf scores + 50% drone scores. "
+            "Weights are not optimized; fusion accuracy is not evaluated."
+        )
+
+        fusion_input_key = None
+
+        if fusion_leaf_valid and fusion_drone_valid:
+            fusion_input_key = (
+                hashlib.sha256(fusion_leaf_bytes).hexdigest(),
+                hashlib.sha256(fusion_drone_bytes).hexdigest(),
+                fusion_relationship,
+                pair_details.strip(),
+                pairing_confirmed
+            )
+
+        fusion_ready = fusion_leaf_valid and fusion_drone_valid
+
+        if verified_pair_mode:
+            fusion_ready = (
+                fusion_ready
+                and pairing_confirmed
+                and bool(pair_details.strip())
+            )
+
+        fusion_clicked = st.button(
+            "Run experimental fusion →",
+            type="primary",
+            width="stretch",
+            disabled=not fusion_ready,
+            key="fusion_predict_button"
+        )
+
+        if fusion_clicked:
+            st.session_state.verdant_fusion_result = None
+
+            try:
+                with st.spinner("Analyzing both inputs and combining scores…"):
+                    fusion_start = time.perf_counter()
+
+                    fusion_result = analyze_fusion(
+                        fusion_leaf_bytes,
+                        fusion_drone_bytes
+                    )
+
+                    fusion_elapsed = time.perf_counter() - fusion_start
+
+                fusion_record = {
+                    **fusion_result,
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "leaf_filename": fusion_leaf_file.name,
+                    "drone_filename": fusion_drone_file.name,
+                    "leaf_sha256": fusion_input_key[0],
+                    "drone_sha256": fusion_input_key[1],
+                    "input_relationship": fusion_relationship,
+                    "source_details": pair_details.strip(),
+                    "pairing_confirmed_by_user": pairing_confirmed,
+                    "elapsed_seconds": round(fusion_elapsed, 3),
+                    "guidance_status": (
+                        "Conditional scouting guidance only"
+                        if verified_pair_mode
+                        else "No crop-level guidance for unverified inputs"
+                    )
+                }
+
+                st.session_state.verdant_fusion_result = {
+                    "input_key": fusion_input_key,
+                    "record": fusion_record
+                }
+
+                st.session_state.verdant_fusion_history.append(
+                    fusion_record
+                )
+
+            except Exception as error:
+                st.error("Fusion could not be completed.")
+
+                with st.expander("View fusion error details"):
+                    st.code(f"{type(error).__name__}: {error}")
+
+    current_fusion = st.session_state.verdant_fusion_result
+
+    if (
+        current_fusion is not None
+        and fusion_input_key is not None
+        and current_fusion["input_key"] == fusion_input_key
+    ):
+        fusion_record = current_fusion["record"]
+
+        with st.container(border=True):
+            panel_heading("04", "Fusion results")
+
+            if not fusion_record["pairing_confirmed_by_user"]:
+                st.warning(
+                    "UNVERIFIED-INPUT DEMONSTRATION. "
+                    "This is a combined score calculation, not a "
+                    "validated crop or plot diagnosis."
+                )
+            else:
+                st.info(
+                    "Correspondence is user-confirmed. "
+                    "This experimental result is not independently validated."
+                )
+
+            leaf_metric, drone_metric, combined_metric = st.columns(3)
+
+            leaf_metric.metric(
+                "Leaf prediction",
+                LABELS[fusion_record["leaf_prediction"]]
+            )
+            drone_metric.metric(
+                "Drone prediction",
+                LABELS[fusion_record["drone_prediction"]]
+            )
+            combined_metric.metric(
+                "Combined prediction",
+                (
+                    LABELS[fusion_record["fused_prediction"]]
+                    if fusion_record["fused_prediction"] is not None
+                    else "Tied"
+                )
+            )
+
+            st.caption(
+                f"Highest combined score: "
+                f"{fusion_record['highest_combined_score']:.2%} · "
+                f"Elapsed time: {fusion_record['elapsed_seconds']:.2f}s"
+            )
+
+            if fusion_record["branches_agree"]:
+                st.success(
+                    "Both branches selected the same category. "
+                    "Agreement does not prove that the category is correct."
+                )
+            else:
+                st.warning(
+                    "The branches disagree. Review the inputs and their "
+                    "relationship; averaging does not establish which "
+                    "individual prediction is correct."
+                )
+
+            score_column, comparison_column = st.columns(
+                [1, 1.15], gap="large"
+            )
+
+            with score_column:
+                st.markdown("**Combined class scores**")
+                render_scores(fusion_record["combined_scores"])
+
+            with comparison_column:
+                st.markdown("**Branch comparison**")
+
+                fusion_score_table = pd.DataFrame([
+                    {
+                        "Category": LABELS[label],
+                        "Leaf (%)": (
+                            fusion_record["leaf_scores"][label] * 100
+                        ),
+                        "Drone (%)": (
+                            fusion_record["drone_scores"][label] * 100
+                        ),
+                        "Combined (%)": (
+                            fusion_record["combined_scores"][label] * 100
+                        )
+                    }
+                    for label in LABELS
+                ])
+
+                st.dataframe(
+                    fusion_score_table.round(2),
+                    hide_index=True,
+                    width="stretch"
+                )
+
+            render_score_explanation(fusion_record["combined_scores"])
+
+            if fusion_record["pairing_confirmed_by_user"]:
+                render_precautions(
+                    fusion_record["fused_prediction"],
+                    aerial=True,
+                    disagreement=not fusion_record["branches_agree"]
+                )
+            else:
+                st.caption(
+                    "Crop-level precautions are not inferred from this "
+                    "unverified combination. Analyze each image separately "
+                    "for conditional inspection guidance."
+                )
+
+            st.download_button(
+                "Download fusion result · JSON",
+                data=json.dumps(fusion_record, indent=2),
+                file_name="experimental_fusion_result.json",
+                mime="application/json",
+                width="stretch",
+                key="fusion_result_download"
+            )
+
+    with st.expander("Separate fusion history"):
+        if st.session_state.verdant_fusion_history:
+            fusion_history_rows = []
+
+            for saved_record in st.session_state.verdant_fusion_history:
+                history_row = {
+                    "timestamp_utc": saved_record["timestamp_utc"],
+                    "leaf_filename": saved_record["leaf_filename"],
+                    "drone_filename": saved_record["drone_filename"],
+                    "input_relationship": saved_record["input_relationship"],
+                    "source_details": saved_record["source_details"],
+                    "leaf_prediction": saved_record["leaf_prediction"],
+                    "drone_prediction": saved_record["drone_prediction"],
+                    "fused_prediction": (
+                        saved_record["fused_prediction"] or "tied"
+                    ),
+                    "highest_combined_score": (
+                        saved_record["highest_combined_score"]
+                    ),
+                    "elapsed_seconds": saved_record["elapsed_seconds"]
+                }
+
+                for label in LABELS:
+                    history_row[f"leaf_score_{label}"] = (
+                        saved_record["leaf_scores"][label]
+                    )
+                    history_row[f"drone_score_{label}"] = (
+                        saved_record["drone_scores"][label]
+                    )
+                    history_row[f"combined_score_{label}"] = (
+                        saved_record["combined_scores"][label]
+                    )
+
+                fusion_history_rows.append(history_row)
+
+            fusion_history_frame = pd.DataFrame(fusion_history_rows)
+
+            st.dataframe(
+                fusion_history_frame[[
+                    "leaf_filename",
+                    "drone_filename",
+                    "input_relationship",
+                    "fused_prediction",
+                    "highest_combined_score"
+                ]],
+                hide_index=True,
+                width="stretch"
+            )
+
+            st.download_button(
+                "Export fusion history · CSV",
+                data=fusion_history_frame.to_csv(
+                    index=False
+                ).encode("utf-8"),
+                file_name="experimental_fusion_history.csv",
+                mime="text/csv",
+                key="fusion_history_download"
+            )
+
+            if st.button(
+                "Clear fusion history",
+                key="clear_fusion_history"
+            ):
+                st.session_state.verdant_fusion_history = []
+                st.rerun()
+        else:
+            st.caption("No fusion runs have been recorded in this session.")
+
+        st.caption(
+            "Fusion history is separate from individual-image history. "
+            "Download it before closing or restarting the app."
+        )
 
 with history_tab:
     st.subheader("Your analysis trail")
     st.caption(
-        "Review and export predictions from this browser session. "
-        "This log does not measure prediction accuracy."
+        "Review and export individual-image predictions from this browser "
+        "session. This log does not measure prediction accuracy."
     )
 
     if st.session_state.verdant_history:
@@ -844,11 +1458,16 @@ with history_tab:
                 "Export session · CSV",
                 data=history.to_csv(index=False).encode("utf-8"),
                 file_name="soybean_prediction_history.csv",
-                mime="text/csv"
+                mime="text/csv",
+                key="single_history_download"
             )
 
         with clear_column:
-            if st.button("Clear history", width="stretch"):
+            if st.button(
+                "Clear history",
+                width="stretch",
+                key="clear_single_history"
+            ):
                 st.session_state.verdant_history = []
                 st.rerun()
 
@@ -917,6 +1536,25 @@ with evidence_tab:
             """
         )
 
+    with st.expander("How experimental fusion works"):
+        st.markdown(
+            """
+            The separate fusion workspace runs both saved models and computes:
+
+            **Combined score = 0.5 × leaf score + 0.5 × drone score**
+
+            The category with the highest combined score is displayed.
+            Near-equal top scores are reported as a tie.
+
+            - The weights are a fixed starting baseline.
+            - No joint training is performed by this operation.
+            - The app cannot independently verify input correspondence.
+            - Unverified inputs are labeled as software demonstrations.
+            - Fusion accuracy and improvement have not been evaluated.
+            - Individual test accuracies are not fusion accuracy.
+            """
+        )
+
     with st.expander("Evaluation boundaries"):
         st.markdown(
             """
@@ -925,7 +1563,10 @@ with evidence_tab:
             - Healthy and diseased leaf images came from different years.
             - External generalization and early-stage detection are not established.
             - Other crops and unrelated images are not automatically rejected.
-            - Verified matching leaf–drone pairs are needed for fusion evaluation.
+            - Verified matching leaf–drone observations with reliable target
+              labels are needed for fusion evaluation.
+            - Model percentages do not measure severity or infected area.
+            - Precautions are general inspection guidance, not treatment prescriptions.
             """
         )
 
